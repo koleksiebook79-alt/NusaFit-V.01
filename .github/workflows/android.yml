@@ -1,1 +1,126 @@
+name: NusaFit Android Build
 
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GRADLE_VERSION: "8.13"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Configure Firebase
+        shell: bash
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.NUSAFIT_GOOGLE_SERVICES_JSON }}
+        run: |
+          set -euo pipefail
+          test -n "$GOOGLE_SERVICES_JSON" || {
+            echo "::error::Missing repository secret NUSAFIT_GOOGLE_SERVICES_JSON"
+            exit 1
+          }
+
+          printf '%s' "$GOOGLE_SERVICES_JSON" > app/google-services.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          json.loads(
+              Path("app/google-services.json").read_text()
+          )
+
+          print("Firebase google-services.json: valid JSON")
+          PY
+
+      - name: Configure Google Maps key
+        shell: bash
+        env:
+          MAPS_API_KEY: ${{ secrets.NUSAFIT_MAPS_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          test -n "$MAPS_API_KEY" || {
+            echo "::error::Missing repository secret NUSAFIT_MAPS_API_KEY"
+            exit 1
+          }
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+
+          p = Path("app/src/main/res/values/strings.xml")
+          s = p.read_text(encoding="utf-8")
+
+          key = os.environ["MAPS_API_KEY"].strip()
+
+          if "YOUR_GOOGLE_MAPS_API_KEY" not in s:
+              print(
+                  "Google Maps placeholder not found; "
+                  "leaving file unchanged."
+              )
+          else:
+              p.write_text(
+                  s.replace(
+                      "YOUR_GOOGLE_MAPS_API_KEY",
+                      key
+                  ),
+                  encoding="utf-8"
+              )
+          PY
+
+      - name: Verify build configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s app/google-services.json
+          test -s app/src/main/res/values/strings.xml
+
+          test "$(
+            grep -c 'YOUR_GOOGLE_MAPS_API_KEY' \
+            app/src/main/res/values/strings.xml || true
+          )" = "0"
+
+          gradle --version
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all \
+            assembleDebug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NusaFit-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
